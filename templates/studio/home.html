@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Avatar AI Studio</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-dark bg-dark px-4">
+    <span class="navbar-brand">Avatar AI Studio</span>
+    <div class="d-flex align-items-center gap-3 text-white">
+        <span>Usuario: <strong>{{ request.user.username }}</strong></span>
+        <span class="badge bg-info text-dark">Créditos: {{ request.user.video_credits }}</span>
+        {% if request.user.is_admin_role %}
+            <a href="{% url 'admin_dashboard' %}" class="btn btn-outline-warning btn-sm">Ir al Administrativo</a>
+        {% endif %}
+        <form action="{% url 'logout' %}" method="post" class="m-0">{% csrf_token %}<button class="btn btn-danger btn-sm">Salir</button></form>
+    </div>
+</nav>
+
+<div class="container py-4">
+    {% for message in messages %}
+        <div class="alert alert-{{ message.tags }} alert-dismissible fade show">{{ message }}</div>
+    {% endfor %}
+
+    <div class="row g-4">
+        <!-- Columna 1: Crear Avatar desde Imagen -->
+        <div class="col-md-5">
+            <div class="card shadow-sm">
+                <div class="card-header bg-primary text-white">1. Crear Avatar Animado</div>
+                <div class="card-body">
+                    <form method="post" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        {{ avatar_form.as_p }}
+                        <div class="mb-3 text-center">
+                            <img id="preview" src="#" alt="Vista previa" class="img-thumbnail d-none" style="max-height: 180px;">
+                        </div>
+                        <button type="submit" name="create_avatar" class="btn btn-primary w-100">Guardar Avatar</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+ <!-- Columna 2: Generar Video con Guion -->
+        <div class="col-md-7">
+            <div class="card shadow-sm">
+                <div class="card-header bg-success text-white">2. Generar Video desde Guion</div>
+                <div class="card-body">
+                    <form method="post" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        {{ video_form.as_p }}
+                        <button type="submit" name="create_video" class="btn btn-success w-100">Generar Video con IA</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+    <!-- Sección Mis Avatares -->
+    <h4 class="mt-5 mb-3">Mis Avatares Configurados</h4>
+    <div class="row g-3">
+        {% for avatar in avatars %}
+        <div class="col-md-3">
+            <div class="card h-100 shadow-sm">
+                <img src="{{ avatar.source_image.url }}" class="card-img-top" style="height: 200px; object-fit: cover;">
+                <div class="card-body">
+                    <h6 class="card-title">{{ avatar.name }}</h6>
+                    <small class="text-muted d-block">Movimiento: {{ avatar.get_motion_style_display }}</small>
+                    <small class="text-muted">Intensidad: {{ avatar.motion_intensity }}x</small>
+                </div>
+            </div>
+        </div>
+        {% empty %}
+        <p class="text-muted">Aún no has creado ningún avatar.</p>
+        {% endfor %}
+    </div>
+
+    <!-- Sección Videos Generados -->
+    <h4 class="mt-5 mb-3">Historial de Videos</h4>
+    <table class="table table-bordered bg-white shadow-sm align-middle">
+        <thead class="table-dark">
+            <tr>
+                <th>Título</th>
+                <th>Avatar</th>
+                <th>Voz</th>
+                <th>Guion</th>
+                <th>Estado</th>
+                <th>Resultado</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for video in videos %}
+            <tr>
+                <td>{{ video.title }}</td>
+                <td>{{ video.avatar.name }}</td>
+                <td>{{ video.get_voice_id_display }}</td>
+                <td>{{ video.script_text|truncatechars:60 }}</td>
+                <td>
+                    {% if video.status == 'COMPLETED' %}
+                        <span class="badge bg-success">{{ video.get_status_display }}</span>
+                    {% elif video.status == 'PROCESSING' or video.status == 'PENDING' %}
+                        <span class="badge bg-warning text-dark status-pending">{{ video.get_status_display }}...</span>
+                    {% else %}
+                        <span class="badge bg-danger">{{ video.get_status_display }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if video.output_video %}
+                        <video width="220" controls class="rounded shadow-sm">
+                            <source src="{{ video.output_video.url }}" type="video/mp4">
+                        </video>
+                        <br>
+                        <a href="{{ video.output_video.url }}" download class="btn btn-sm btn-outline-primary mt-1">Descargar MP4</a>
+                    {% else %}
+                        <span class="text-muted">Renderizando...</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6" class="text-center text-muted">No hay videos generados todavía.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+    // Previsualización instantánea de la imagen del avatar
+    document.getElementById('id_source_image').onchange = evt => {
+        const [file] = evt.target.files;
+        if (file) {
+            const preview = document.getElementById('preview');
+            preview.src = URL.createObjectURL(file);
+            preview.classList.remove('d-none');
+        }
+    };
+
+    // Si hay videos generándose, recargar cada 4 segundos hasta que terminen
+    if (document.querySelector('.status-pending')) {
+        setTimeout(() => {
+            window.location.reload();
+        }, 4000);
+    }
+</script>
+</body>
+</html>
