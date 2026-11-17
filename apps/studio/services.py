@@ -3,10 +3,12 @@ import io
 import time
 import asyncio
 import threading
+import traceback
 import requests
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import replicate
-import httpx
-from replicate.exceptions import ReplicateError
 import numpy as np
 import edge_tts
 from PIL import Image, ImageDraw, ImageOps
@@ -16,17 +18,75 @@ from django.core.files import File
 from .models import Avatar, VideoProject
 
 
-def _run_replicate_with_retry(model_id: str, input_data: dict, max_retries: int = 5):
-    """Respeta el límite de 1 petición cada 10s y reintenta automáticamente ante error 429."""
+def _get_replicate_client():
+    """Lee el .env desde la raíz de Django, limpia espacios y crea un cliente fresco."""
+    env_path = os.path.join(settings.BASE_DIR, '.env')
+    load_dotenv(dotenv_path=env_path, override=True)
+    token = os.getenv("REPLICATE_API_TOKEN", "").strip().strip('"').strip("'")
+    if not token:
+        raise ValueError("REPLICATE_API_TOKEN está vacío en el archivo .env")
+    return replicate.Client(api_token=token)
+
+
+def _run_replicate_with_retry(model_id: str, input_data: dict, step_name: str, max_retries: int = 3, timeout_seconds: int = 480):
+    """Crea la predicción y consulta su estado con límite de tiempo para evitar bucles infinitos."""
+    print(f"---> Iniciando [{step_name}] usando modelo: {model_id}")
+    client = _get_replicate_client()
+
+    prediction = None
     for attempt in range(max_retries):
         try:
-            return replicate.run(model_id, input=input_data)
-        except ReplicateError as e:
-            if "429" in str(e) and attempt < max_retries - 1:
-                print(f"[Replicate 429] Esperando 13 segundos antes de reintentar ({attempt + 1}/{max_retries})...")
-                time.sleep(13)
+            if ":" in model_id:
+                version_id = model_id.split(":", 1)[1]
+                prediction = client.predictions.create(version=version_id, input=input_data)
+            else:
+                prediction = client.models.predictions.create(model=model_id, input=input_data)
+            print(f"     ID de predicción creada: {prediction.id}")
+            break
+        except Exception as e:
+            err_msg = str(e)
+            print(f"[Fallo al iniciar {step_name} - intento {attempt + 1}/{max_retries}]: {err_msg}")
+            if any(code in err_msg for code in ["429", "500", "502", "503", "504", "530"]) and attempt < max_retries - 1:
+                time.sleep(12)
             else:
                 raise
+
+    start_time = time.time()
+    consecutive_errors = 0
+
+    while prediction.status not in ("succeeded", "failed", "canceled"):
+        if time.time() - start_time > timeout_seconds:
+            try:
+                client.predictions.cancel(prediction.id)
+            except Exception:
+                pass
+            raise TimeoutError(f"Tiempo límite de {timeout_seconds}s excedido esperando [{step_name}].")
+
+        time.sleep(5)
+        try:
+            prediction = client.predictions.get(prediction.id)
+            consecutive_errors = 0
+            print(f"     Estado [{step_name}]: {prediction.status}")
+        except Exception as e:
+            consecutive_errors += 1
+            print(f"[Aviso de red ({consecutive_errors}/8) consultando {step_name}]: {str(e)[:60]}...")
+            if consecutive_errors >= 8:
+                raise RuntimeError(f"Replicate devolvió error de red 8 veces seguidas en [{step_name}].")
+            time.sleep(5)
+
+    if prediction.status != "succeeded":
+        raise RuntimeError(f"La predicción de {step_name} terminó con estado '{prediction.status}': {prediction.error}")
+
+    return prediction.output
+
+
+def _extract_bytes_from_output(output) -> bytes:
+    """Extrae los bytes directamente de FileOutput, lista o URL devuelta por Replicate."""
+    item = output[0] if isinstance(output, (list, tuple)) else output
+    if hasattr(item, "read"):
+        return item.read()
+    url = item.url if hasattr(item, "url") else str(item)
+    return requests.get(url).content
 
 
 async def _generate_tts_audio(text: str, voice: str, output_audio_path: str):
@@ -67,84 +127,74 @@ def _get_preset_background(choice: str, temp_dir: str, size=(768, 768)) -> str:
 
 
 def _get_or_create_cartoon_avatar(avatar: Avatar, oriented_img_path: str, temp_dir: str) -> str:
-    """Genera la caricatura UNA sola vez y la guarda en el avatar para no volver a cobrarla."""
+    """Convierte a caricatura usando modelo oficial activo en Replicate y guarda el resultado."""
     if avatar.visual_style == 'original':
         return oriented_img_path
 
-    # Si ya se generó y guardó previamente, reutilizarla sin gastar crédito en Replicate
     if avatar.processed_avatar and os.path.exists(avatar.processed_avatar.path):
-        print(f"[Ahorro] Reutilizando avatar caricaturizado ya guardado para '{avatar.name}'.")
+        print(f"[Ahorro] Reutilizando avatar caricaturizado guardado para '{avatar.name}'.")
         return avatar.processed_avatar.path
 
     prompt = (
-        "3D animated cartoon character portrait, Pixar style, expressive face, vibrant colors, studio lighting"
+        "3D animated Pixar style cartoon character portrait, expressive face, clean studio lighting, high quality"
         if avatar.visual_style == 'cartoon_3d'
-        else "2D stylized cartoon illustration character, clean lines, expressive portrait"
+        else "2D stylized cartoon illustration character portrait, clean lines, vibrant colors"
     )
 
-    print("[Paso 1/3] Generando versión caricatura en Replicate...")
     with open(oriented_img_path, "rb") as img_file:
         output = _run_replicate_with_retry(
-            "fofr/face-to-many:a07f252abbbd832009640b27f063ea52d87d7a23a185ca165bec23b5adc8deaf",
+            "black-forest-labs/flux-kontext-pro",
             {
-                "image": img_file,
-                "style": "3D" if avatar.visual_style == 'cartoon_3d' else "Anime",
-                "prompt": prompt,
-                "prompt_strength": 4.5,
-            }
+                "prompt": f"Transform this person into a {prompt}, keeping exact facial features and pose",
+                "input_image": img_file,
+                "output_format": "jpg"
+            },
+            step_name="Caricaturización"
         )
 
-    result_url = output[0] if isinstance(output, list) else str(output)
-    img_data = requests.get(result_url).content
-
+    img_data = _extract_bytes_from_output(output)
     cartoon_path = os.path.join(temp_dir, f"cartoon_avatar_{avatar.id}.jpg")
     with open(cartoon_path, 'wb') as f:
         f.write(img_data)
 
-    # Guardar permanentemente en el modelo Avatar para reutilizarlo en futuros videos
     with open(cartoon_path, 'rb') as f:
         avatar.processed_avatar.save(f"cartoon_{avatar.id}.jpg", File(f), save=True)
 
-    # Pausa obligatoria tras llamada a Replicate
-    time.sleep(13)
     return avatar.processed_avatar.path
 
 
 def _replace_background(avatar_img_path: str, bg_img_path: str, output_path: str) -> str:
-    print("[Paso 2/3] Cambiando fondo del avatar en Replicate...")
+    """Recorta el fondo usando modelo oficial activo de Replicate."""
     with open(avatar_img_path, 'rb') as img_file:
-        nobg_url = _run_replicate_with_retry(
-            "cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003",
-            {"image": img_file}
+        nobg_output = _run_replicate_with_retry(
+            "lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1",
+            {"image": img_file},
+            step_name="Cambio de Fondo"
         )
 
-    fg_bytes = requests.get(str(nobg_url)).content
+    fg_bytes = _extract_bytes_from_output(nobg_output)
     foreground = Image.open(io.BytesIO(fg_bytes)).convert("RGBA")
     background = Image.open(bg_img_path).convert("RGBA").resize(foreground.size)
 
     combined = Image.alpha_composite(background, foreground).convert("RGB")
     combined.save(output_path, format="JPEG", quality=95)
-
-    # Pausa obligatoria tras llamada a Replicate
-    time.sleep(13)
     return output_path
 
 
 def _animate_talking_head_cloud(avatar_path: str, audio_path: str, motion_style: str, output_video_path: str):
-    print("[Paso 3/3] Generando video animado (boca y cabeza) en Replicate...")
+    """Anima imagen + audio usando bytedance/omni-human (o lucataco/sadtalker) con espera de hasta 8 min."""
     with open(avatar_path, "rb") as img_f, open(audio_path, "rb") as aud_f:
-        video_url = _run_replicate_with_retry(
-            "cjwbw/sadtalker:3aa3dac9353cc4d6bd62a8f95957bd844003b401ca4e4a9b33baa574c549d376",
+        video_output = _run_replicate_with_retry(
+            "bytedance/omni-human",
             {
-                "source_image": img_f,
-                "driven_audio": aud_f,
-                "preprocess": "full",
-                "still_mode": False,
-                "expression_scale": 1.35 if motion_style == 'expressive' else 1.0,
-            }
+                "image": img_f,
+                "audio": aud_f,
+            },
+            step_name="Animación de Avatar",
+            timeout_seconds=480
         )
 
-    video_bytes = requests.get(str(video_url)).content
+    video_bytes = _extract_bytes_from_output(video_output)
     with open(output_video_path, 'wb') as f:
         f.write(video_bytes)
 
@@ -163,10 +213,10 @@ def process_video_generation(video_id: int):
         audio_path = os.path.join(temp_dir, f"audio_{video.id}.mp3")
         final_video_path = os.path.join(temp_dir, f"video_{video.id}.mp4")
 
-        # 1. Obtener o generar caricatura (solo cobra la primera vez para ese avatar)
+        # 1. Caricaturización
         current_img = _get_or_create_cartoon_avatar(video.avatar, oriented_img, temp_dir)
 
-        # 2. Cambiar el Fondo (solo si no se eligió mantener el original)
+        # 2. Cambio de fondo
         if video.background_choice != 'original':
             if video.background_choice == 'custom' and video.custom_background:
                 bg_source = _fix_image_orientation(video.custom_background.path, temp_dir)
@@ -174,13 +224,13 @@ def process_video_generation(video_id: int):
                 bg_source = _get_preset_background(video.background_choice, temp_dir)
             current_img = _replace_background(current_img, bg_source, bg_applied_path)
 
-        # 3. Generar Audio Neuronal desde el Guion
+        # 3. Voz neuronal
         asyncio.run(_generate_tts_audio(video.script_text, video.voice_id, audio_path))
 
-        # 4. Generar Video Animado
+        # 4. Animación de boca, cabeza y manos
         _animate_talking_head_cloud(current_img, audio_path, video.avatar.motion_style, final_video_path)
 
-        # 5. Guardar el resultado final en Django
+        # 5. Guardar resultado
         with open(final_video_path, 'rb') as f:
             video.output_video.save(f"avatar_studio_{video.id}.mp4", File(f), save=False)
 
@@ -188,7 +238,6 @@ def process_video_generation(video_id: int):
         video.save()
         print(f"[OK] Video {video.id} completado con éxito.")
 
-        # Limpiar archivos temporales
         for path in [oriented_img, bg_applied_path, audio_path, final_video_path]:
             if os.path.exists(path) and temp_dir in path:
                 os.remove(path)
@@ -198,23 +247,9 @@ def process_video_generation(video_id: int):
         video.status = VideoProject.Status.FAILED
         video.save()
         print(f"[ERROR VIDEO {video_id}]: {e}")
+        traceback.print_exc()
 
 
 def start_video_job_async(video_id: int):
     thread = threading.Thread(target=process_video_generation, args=(video_id,), daemon=True)
     thread.start()
-    import httpx
-
-def _run_replicate_with_retry(model_id: str, input_data: dict, max_retries: int = 5):
-    """Respeta el límite de velocidad y reintenta ante errores 429 o microcortes DNS/red."""
-    for attempt in range(max_retries):
-        try:
-            return replicate.run(model_id, input=input_data)
-        except Exception as e:
-            err_msg = str(e)
-            is_retryable = any(code in err_msg for code in ["429", "11001", "getaddrinfo", "ConnectError", "Timeout"])
-            if is_retryable and attempt < max_retries - 1:
-                print(f"[Reintento {attempt + 1}/{max_retries}] Esperando 13s por: {err_msg[:80]}...")
-                time.sleep(13)
-            else:
-                raise
