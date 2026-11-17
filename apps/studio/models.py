@@ -59,6 +59,13 @@ class VideoProject(models.Model):
         STUDIO = 'studio', 'Estudio de Noticias / Podcast'
         CUSTOM = 'custom', 'Imagen de fondo personalizada'
 
+    class BackgroundChoice(models.TextChoices):
+        ORIGINAL = 'original', 'Mantener fondo original'
+        GREENSCREEN = 'greenscreen', 'Fondo Verde (Chroma Key)'
+        OFFICE = 'office', 'Oficina Moderna'
+        STUDIO = 'studio', 'Estudio Profesional'
+        CUSTOM = 'custom', 'Imagen personalizada'
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='videos')
     avatar = models.ForeignKey(Avatar, on_delete=models.CASCADE, related_name='videos')
     title = models.CharField(max_length=150, verbose_name="Título del video")

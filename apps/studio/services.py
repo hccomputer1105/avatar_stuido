@@ -107,7 +107,10 @@ def _get_preset_background(choice: str, temp_dir: str, size=(768, 768)) -> str:
     img = Image.new("RGB", size)
     draw = ImageDraw.Draw(img)
 
-    if choice == 'office':
+    if choice == 'greenscreen':
+        # Verde Chroma Key puro (#00FF00) estándar para edición de video
+        img.paste((0, 255, 0))
+    elif choice == 'office':
         for y in range(size[1]):
             r = int(210 - (y / size[1]) * 40)
             g = int(225 - (y / size[1]) * 35)
@@ -122,7 +125,7 @@ def _get_preset_background(choice: str, temp_dir: str, size=(768, 768)) -> str:
     else:
         img.paste((240, 240, 240))
 
-    img.save(bg_path, format="JPEG", quality=90)
+    img.save(bg_path, format="JPEG", quality=98)
     return bg_path
 
 
@@ -164,7 +167,7 @@ def _get_or_create_cartoon_avatar(avatar: Avatar, oriented_img_path: str, temp_d
 
 
 def _replace_background(avatar_img_path: str, bg_img_path: str, output_path: str) -> str:
-    """Recorta el fondo usando modelo oficial activo de Replicate."""
+    """Recorta el fondo y aplica limpieza de bordes para Chroma Key limpio."""
     with open(avatar_img_path, 'rb') as img_file:
         nobg_output = _run_replicate_with_retry(
             "lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1",
@@ -174,10 +177,16 @@ def _replace_background(avatar_img_path: str, bg_img_path: str, output_path: str
 
     fg_bytes = _extract_bytes_from_output(nobg_output)
     foreground = Image.open(io.BytesIO(fg_bytes)).convert("RGBA")
-    background = Image.open(bg_img_path).convert("RGBA").resize(foreground.size)
 
+    # Limpiar halos semitransparentes en los bordes si se usa fondo verde
+    if "bg_greenscreen" in os.path.basename(bg_img_path):
+        r, g, b, a = foreground.split()
+        a = a.point(lambda p: 255 if p > 180 else 0)
+        foreground = Image.merge("RGBA", (r, g, b, a))
+
+    background = Image.open(bg_img_path).convert("RGBA").resize(foreground.size)
     combined = Image.alpha_composite(background, foreground).convert("RGB")
-    combined.save(output_path, format="JPEG", quality=95)
+    combined.save(output_path, format="JPEG", quality=98)
     return output_path
 
 
