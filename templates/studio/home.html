@@ -139,6 +139,47 @@
             window.location.reload();
         }, 4000);
     }
+
+    
+</script>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const modeSelect = document.getElementById("id_voice_mode");
+    const voiceField = document.getElementById("id_voice_id");
+    const audioField = document.getElementById("id_custom_audio");
+    const scriptField = document.getElementById("id_script_text");
+
+    function getFieldWrapper(el) {
+        if (!el) return null;
+        // Busca solo el contenedor inmediato del campo (p o mb-3), nunca card-body
+        const wrapper = el.closest("p, .mb-3, .form-group");
+        return (wrapper && !wrapper.classList.contains("card-body")) ? wrapper : el.parentElement;
+    }
+
+    const systemVoiceBox = getFieldWrapper(voiceField);
+    const customAudioBox = getFieldWrapper(audioField);
+    const scriptBox = getFieldWrapper(scriptField);
+
+    function toggleVoiceFields() {
+        if (!modeSelect) return;
+        const val = modeSelect.value;
+
+        if (systemVoiceBox) {
+            systemVoiceBox.style.display = (val === "system") ? "" : "none";
+        }
+        if (customAudioBox) {
+            customAudioBox.style.display = (val === "uploaded") ? "" : "none";
+        }
+        if (scriptBox) {
+            scriptBox.style.display = (val === "uploaded") ? "none" : "";
+        }
+    }
+
+    if (modeSelect) {
+        modeSelect.addEventListener("change", toggleVoiceFields);
+        toggleVoiceFields();
+    }
+});
 </script>
 </body>
 </html>

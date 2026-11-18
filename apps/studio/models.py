@@ -38,9 +38,20 @@ class Avatar(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.user.username})"
+    voice_sample = models.FileField(
+        upload_to='avatars/voices/',
+        blank=True,
+        null=True,
+        verbose_name="Muestra de voz propia (WAV/MP3, 6-15 seg)"
+    )
 
 
 class VideoProject(models.Model):
+    class VoiceMode(models.TextChoices):
+        SYSTEM = 'system', 'Voz del sistema (Edge TTS)'
+        CLONED = 'cloned', 'Clonar voz propia del avatar'
+        UPLOADED = 'uploaded', 'Subir audio grabado directamente'
+
     class Status(models.TextChoices):
         PENDING = 'PENDING', 'En cola'
         PROCESSING = 'PROCESSING', 'Generando animación'
@@ -88,5 +99,20 @@ class VideoProject(models.Model):
     external_job_id = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    voice_mode = models.CharField(
+        max_length=20,
+        choices=VoiceMode.choices,
+        default=VoiceMode.SYSTEM,
+        verbose_name="Modo de voz"
+    )
+    custom_audio = models.FileField(
+        upload_to='videos/custom_audios/',
+        blank=True,
+        null=True,
+        verbose_name="Audio grabado propio (opcional)"
+    )
+
     def __str__(self):
         return f"{self.title} - {self.get_status_display()}"
+
+    

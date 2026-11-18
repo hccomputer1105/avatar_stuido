@@ -5,6 +5,7 @@ import asyncio
 import threading
 import traceback
 import requests
+import shutil
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -234,7 +235,18 @@ def process_video_generation(video_id: int):
             current_img = _replace_background(current_img, bg_source, bg_applied_path)
 
         # 3. Voz neuronal
-        asyncio.run(_generate_tts_audio(video.script_text, video.voice_id, audio_path))
+        # 3. Generar o preparar el Audio según la elección del usuario
+        if video.voice_mode == 'cloned' and video.avatar.voice_sample:
+            _generate_cloned_voice_audio(
+                video.script_text,
+                video.avatar.voice_sample.path,
+                audio_path
+            )
+        elif video.voice_mode == 'uploaded' and video.custom_audio:
+            shutil.copy(video.custom_audio.path, audio_path)
+        else:
+            # Por defecto: Voz neuronal del sistema (Edge TTS)
+            asyncio.run(_generate_tts_audio(video.script_text, video.voice_id, audio_path))
 
         # 4. Animación de boca, cabeza y manos
         _animate_talking_head_cloud(current_img, audio_path, video.avatar.motion_style, final_video_path)
@@ -262,3 +274,27 @@ def process_video_generation(video_id: int):
 def start_video_job_async(video_id: int):
     thread = threading.Thread(target=process_video_generation, args=(video_id,), daemon=True)
     thread.start()
+
+import shutil
+
+def _generate_cloned_voice_audio(text: str, speaker_audio_path: str, output_audio_path: str):
+    """Replica la voz de la muestra del usuario leyendo el guion en español usando la versión vigente de XTTS-v2."""
+    client = _get_replicate_client()
+    model = client.models.get("lucataco/xtts-v2")
+    latest_version_id = model.latest_version.id
+
+    with open(speaker_audio_path, "rb") as speaker_f:
+        audio_output = _run_replicate_with_retry(
+            f"lucataco/xtts-v2:{latest_version_id}",
+            {
+                "text": text,
+                "speaker": speaker_f,
+                "language": "es",
+                "cleanup_voice": True,
+            },
+            step_name="Clonación de Voz Propia"
+        )
+
+    audio_bytes = _extract_bytes_from_output(audio_output)
+    with open(output_audio_path, 'wb') as f:
+        f.write(audio_bytes)
