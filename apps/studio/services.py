@@ -30,55 +30,61 @@ def _get_replicate_client():
 
 
 def _run_replicate_with_retry(model_id: str, input_data: dict, step_name: str, max_retries: int = 3, timeout_seconds: int = 480):
-    """Crea la predicción y consulta su estado con límite de tiempo para evitar bucles infinitos."""
+    """Crea la predicción y consulta su estado, reintentando si hay errores de red o E004 del modelo."""
     print(f"---> Iniciando [{step_name}] usando modelo: {model_id}")
     client = _get_replicate_client()
 
-    prediction = None
     for attempt in range(max_retries):
         try:
+            # 1. Crear la predicción
             if ":" in model_id:
                 version_id = model_id.split(":", 1)[1]
                 prediction = client.predictions.create(version=version_id, input=input_data)
             else:
                 prediction = client.models.predictions.create(model=model_id, input=input_data)
             print(f"     ID de predicción creada: {prediction.id}")
-            break
+
+            # 2. Esperar resultado consultando la predicción
+            start_time = time.time()
+            consecutive_errors = 0
+
+            while prediction.status not in ("succeeded", "failed", "canceled"):
+                if time.time() - start_time > timeout_seconds:
+                    try:
+                        client.predictions.cancel(prediction.id)
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"Tiempo límite de {timeout_seconds}s excedido esperando [{step_name}].")
+
+                time.sleep(5)
+                try:
+                    prediction = client.predictions.get(prediction.id)
+                    consecutive_errors = 0
+                    print(f"     Estado [{step_name}]: {prediction.status}")
+                except Exception as e:
+                    consecutive_errors += 1
+                    print(f"[Aviso de red ({consecutive_errors}/8) consultando {step_name}]: {str(e)[:60]}...")
+                    if consecutive_errors >= 8:
+                        raise RuntimeError(f"Replicate devolvió error de red 8 veces seguidas en [{step_name}].")
+                    time.sleep(5)
+
+            if prediction.status != "succeeded":
+                raise RuntimeError(f"La predicción de {step_name} terminó con estado '{prediction.status}': {prediction.error}")
+
+            return prediction.output
+
         except Exception as e:
             err_msg = str(e)
-            print(f"[Fallo al iniciar {step_name} - intento {attempt + 1}/{max_retries}]: {err_msg}")
-            if any(code in err_msg for code in ["429", "500", "502", "503", "504", "530"]) and attempt < max_retries - 1:
-                time.sleep(12)
+            print(f"[Fallo en {step_name} - intento {attempt + 1}/{max_retries}]: {err_msg}")
+            retryable_tokens = ["429", "500", "502", "503", "504", "530", "E004", "temporarily unavailable"]
+            if any(tok in err_msg for tok in retryable_tokens) and attempt < max_retries - 1:
+                # Rebobinar los archivos abiertos antes de reintentar
+                for val in input_data.values():
+                    if hasattr(val, "seek"):
+                        val.seek(0)
+                time.sleep(15)
             else:
                 raise
-
-    start_time = time.time()
-    consecutive_errors = 0
-
-    while prediction.status not in ("succeeded", "failed", "canceled"):
-        if time.time() - start_time > timeout_seconds:
-            try:
-                client.predictions.cancel(prediction.id)
-            except Exception:
-                pass
-            raise TimeoutError(f"Tiempo límite de {timeout_seconds}s excedido esperando [{step_name}].")
-
-        time.sleep(5)
-        try:
-            prediction = client.predictions.get(prediction.id)
-            consecutive_errors = 0
-            print(f"     Estado [{step_name}]: {prediction.status}")
-        except Exception as e:
-            consecutive_errors += 1
-            print(f"[Aviso de red ({consecutive_errors}/8) consultando {step_name}]: {str(e)[:60]}...")
-            if consecutive_errors >= 8:
-                raise RuntimeError(f"Replicate devolvió error de red 8 veces seguidas en [{step_name}].")
-            time.sleep(5)
-
-    if prediction.status != "succeeded":
-        raise RuntimeError(f"La predicción de {step_name} terminó con estado '{prediction.status}': {prediction.error}")
-
-    return prediction.output
 
 
 def _extract_bytes_from_output(output) -> bytes:
